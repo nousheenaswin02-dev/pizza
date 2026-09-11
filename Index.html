@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; }
+</style>
+</head>
+<body class="bg-stone-100">
+<div id="root"></div>
+
+<script>
+  function gsGetData() {
+    return new Promise((resolve, reject) => {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).getData();
+    });
+  }
+  function gsSaveData(students, teachers) {
+    return new Promise((resolve, reject) => {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).saveData(students, teachers);
+    });
+  }
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+const GRADES = [
+  "Preschool", "Kindergarten",
+  "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5",
+  "Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10"
+];
+
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+function normalizeGrade(raw) {
+  if (raw === undefined || raw === null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return null;
+  if (s.includes("pre")) return "Preschool";
+  if (s === "k" || s.includes("kinder")) return "Kindergarten";
+  const m = s.match(/(\d{1,2})/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 10) return `Grade ${n}`;
+  }
+  return null;
+}
+
+function findKey(row, candidates) {
+  const keys = Object.keys(row);
+  for (const c of candidates) {
+    const hit = keys.find(k => k.trim().toLowerCase() === c);
+    if (hit) return hit;
+  }
+  for (const c of candidates) {
+    const hit = keys.find(k => k.trim().toLowerCase().includes(c));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function App() {
+  const [students, setStudents] = useState([]);
+  const [teachers, setTeachers] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [importError, setImportError] = useState(null);
+  const [expanded, setExpanded] = useState({});
+  const [tab, setTab] = useState("students");
+
+  const [newStudent, setNewStudent] = useState({ name: "", grade: GRADES[0], cheese: 1, salami: 0 });
+  const [newTeacher, setNewTeacher] = useState({ name: "", cheese: 1, salami: 0 });
+
+  const fileRef = useRef(null);
+  const saveTimer = useRef(null);
+
+  useEffect(() => {
+    gsGetData()
+      .then(data => {
+        setStudents(Array.isArray(data.students) ? data.students : []);
+        setTeachers(Array.isArray(data.teachers) ? data.teachers : []);
+      })
+      .catch(() => setSaveError("Couldn't load data from the sheet."))
+      .finally(() => setLoaded(true));
+  }, []);
+
+  const persist = (nextStudents, nextTeachers) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      setSaving(true);
+      setSaveError(null);
+      try {
+        await gsSaveData(nextStudents, nextTeachers);
+      } catch (e) {
+        setSaveError("Save failed. Check the sheet is still shared with this script.");
+      } finally {
+        setSaving(false);
+      }
+    }, 500);
+  };
+
+  const updateStudents = (fn) => {
+    setStudents(prev => {
+      const next = fn(prev);
+      persist(next, teachers);
+      return next;
+    });
+  };
+  const updateTeachers = (fn) => {
+    setTeachers(prev => {
+      const next = fn(prev);
+      persist(students, next);
+      return next;
+    });
+  };
+
+  const grouped = useMemo(() => {
+    const map = {};
+    GRADES.forEach(g => { map[g] = []; });
+    const other = [];
+    for (const s of students) {
+      if (map[s.grade]) map[s.grade].push(s);
+      else other.push(s);
+    }
+    return { map, other };
+  }, [students]);
+
+  const gradeTotals = (list) => list.reduce((acc, s) => ({
+    cheese: acc.cheese + (Number(s.cheese) || 0),
+    salami: acc.salami + (Number(s.salami) || 0),
+    count: acc.count + 1
+  }), { cheese: 0, salami: 0, count: 0 });
+
+  const studentTotal = gradeTotals(students);
+  const teacherTotal = teachers.reduce((acc, t) => ({
+    cheese: acc.cheese + (Number(t.cheese) || 0),
+    salami: acc.salami + (Number(t.salami) || 0),
+    count: acc.count + 1
+  }), { cheese: 0, salami: 0, count: 0 });
+
+  const grandCheese = studentTotal.cheese + teacherTotal.cheese;
+  const grandSalami = studentTotal.salami + teacherTotal.salami;
+
+  const handleFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setImportError(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      if (!rows.length) { setImportError("That file looks empty."); return; }
+
+      const nameKey = findKey(rows[0], ["name", "student", "student name"]);
+      const gradeKey = findKey(rows[0], ["grade", "class"]);
+      const cheeseKey = findKey(rows[0], ["cheese", "cheese slices"]);
+      const salamiKey = findKey(rows[0], ["salami", "salami slices"]);
+
+      if (!nameKey || !gradeKey) {
+        setImportError("Couldn't find name and grade columns. Use headers like Name, Grade, Cheese, Salami.");
+        return;
+      }
+
+      const imported = [];
+      let skipped = 0;
+      for (const row of rows) {
+        const name = String(row[nameKey] || "").trim();
+        const grade = normalizeGrade(row[gradeKey]);
+        if (!name || !grade) { skipped++; continue; }
+        imported.push({
+          id: uid(),
+          name,
+          grade,
+          cheese: cheeseKey ? Number(row[cheeseKey]) || 0 : 0,
+          salami: salamiKey ? Number(row[salamiKey]) || 0 : 0
+        });
+      }
+      if (!imported.length) {
+        setImportError("No valid rows found. Check that grades match Preschool through Grade 10.");
+        return;
+      }
+      updateStudents(prev => [...prev, ...imported]);
+      if (skipped) setImportError(`Imported ${imported.length} students. Skipped ${skipped} rows with missing name or unrecognized grade.`);
+    } catch (err) {
+      setImportError("Couldn't read that file. Try exporting it as .xlsx or .csv.");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const addStudent = () => {
+    const name = newStudent.name.trim();
+    if (!name) return;
+    updateStudents(prev => [...prev, {
+      id: uid(), name, grade: newStudent.grade,
+      cheese: Number(newStudent.cheese) || 0,
+      salami: Number(newStudent.salami) || 0
+    }]);
+    setNewStudent({ name: "", grade: newStudent.grade, cheese: 1, salami: 0 });
+  };
+
+  const addTeacher = () => {
+    const name = newTeacher.name.trim();
+    if (!name) return;
+    updateTeachers(prev => [...prev, {
+      id: uid(), name,
+      cheese: Number(newTeacher.cheese) || 0,
+      salami: Number(newTeacher.salami) || 0
+    }]);
+    setNewTeacher({ name: "", cheese: 1, salami: 0 });
+  };
+
+  const removeStudent = (id) => updateStudents(prev => prev.filter(s => s.id !== id));
+  const removeTeacher = (id) => updateTeachers(prev => prev.filter(t => t.id !== id));
+
+  const editStudent = (id, field, value) => {
+    updateStudents(prev => prev.map(s => s.id === id ? { ...s, [field]: (field === "cheese" || field === "salami") ? Number(value) || 0 : value } : s));
+  };
+  const editTeacher = (id, field, value) => {
+    updateTeachers(prev => prev.map(t => t.id === id ? { ...t, [field]: (field === "cheese" || field === "salami") ? Number(value) || 0 : value } : t));
+  };
+
+  const toggleGrade = (g) => setExpanded(prev => ({ ...prev, [g]: !prev[g] }));
+
+  if (!loaded) {
+    return <div className="min-h-screen flex items-center justify-center text-stone-500">Loading order…</div>;
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto my-4 bg-stone-50 text-stone-900 rounded-2xl overflow-hidden border border-stone-200 shadow-sm">
+      <header className="bg-[#B23A2E] text-[#FBF4E8] px-5 py-5">
+        <h1 className="text-lg font-semibold tracking-tight">🍕 Pizza day order</h1>
+        <p className="text-[#F1D9CC] text-sm">Preschool through Grade 10, plus staff</p>
+        <div className="grid grid-cols-2 gap-3 mt-4">
+          <div className="bg-[#9C3126] rounded-xl px-4 py-3">
+            <div className="text-[#F1D9CC] text-xs uppercase tracking-wide">Cheese slices</div>
+            <div className="text-2xl font-bold">{grandCheese}</div>
+          </div>
+          <div className="bg-[#9C3126] rounded-xl px-4 py-3">
+            <div className="text-[#F1D9CC] text-xs uppercase tracking-wide">Salami slices</div>
+            <div className="text-2xl font-bold">{grandSalami}</div>
+          </div>
+        </div>
+        <p className="text-[#F1D9CC] text-xs mt-3">{studentTotal.count} students · {teacherTotal.count} staff orders</p>
+      </header>
+
+      <div className="flex border-b border-stone-200 bg-white sticky top-0 z-10">
+        <button onClick={() => setTab("students")}
+          className={"flex-1 py-3 text-sm font-medium " + (tab === "students" ? "text-[#B23A2E] border-b-2 border-[#B23A2E]" : "text-stone-500")}>
+          Students
+        </button>
+        <button onClick={() => setTab("teachers")}
+          className={"flex-1 py-3 text-sm font-medium " + (tab === "teachers" ? "text-[#B23A2E] border-b-2 border-[#B23A2E]" : "text-stone-500")}>
+          Staff
+        </button>
+      </div>
+
+      {saveError && <div className="mx-4 mt-3 text-xs bg-amber-50 text-amber-800 border border-amber-200 rounded-lg px-3 py-2">{saveError}</div>}
+
+      {tab === "students" && (
+        <div className="p-4">
+          <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-stone-700">Import from spreadsheet</h2>
+              {saving && <span className="text-xs text-stone-400">Saving…</span>}
+            </div>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" id="pizza-file-input" />
+            <label htmlFor="pizza-file-input" className="flex items-center justify-center gap-2 border-2 border-dashed border-stone-300 rounded-lg py-3 text-sm text-stone-600 cursor-pointer hover:border-[#B23A2E] hover:text-[#B23A2E]">
+              Upload .xlsx or .csv (Name, Grade, Cheese, Salami)
+            </label>
+            {importError && <p className="text-xs text-amber-700 mt-2">{importError}</p>}
+          </div>
+
+          <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+            <h2 className="text-sm font-semibold text-stone-700 mb-3">Add a student</h2>
+            <div className="flex flex-col gap-2">
+              <input type="text" placeholder="Student name" value={newStudent.name}
+                onChange={e => setNewStudent({ ...newStudent, name: e.target.value })}
+                className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+              <div className="grid grid-cols-3 gap-2">
+                <select value={newStudent.grade} onChange={e => setNewStudent({ ...newStudent, grade: e.target.value })}
+                  className="border border-stone-300 rounded-lg px-2 py-2 text-sm">
+                  {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
+                </select>
+                <input type="number" min="0" value={newStudent.cheese} placeholder="Cheese"
+                  onChange={e => setNewStudent({ ...newStudent, cheese: e.target.value })}
+                  className="border border-stone-300 rounded-lg px-2 py-2 text-sm" />
+                <input type="number" min="0" value={newStudent.salami} placeholder="Salami"
+                  onChange={e => setNewStudent({ ...newStudent, salami: e.target.value })}
+                  className="border border-stone-300 rounded-lg px-2 py-2 text-sm" />
+              </div>
+              <button onClick={addStudent} className="bg-[#B23A2E] text-white rounded-lg py-2 text-sm font-medium mt-1">
+                + Add student
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {GRADES.map(g => {
+              const list = grouped.map[g];
+              const totals = gradeTotals(list);
+              const isOpen = !!expanded[g];
+              return (
+                <div key={g} className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+                  <button onClick={() => toggleGrade(g)} className="w-full flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-stone-800">{g}</span>
+                      <span className="text-xs text-stone-400">({totals.count})</span>
+                    </div>
+                    <span className="text-xs text-stone-500">🧀 {totals.cheese} · 🍕 {totals.salami} {isOpen ? "▲" : "▼"}</span>
+                  </button>
+                  {isOpen && (
+                    <div className="border-t border-stone-100">
+                      {list.length === 0 && <p className="px-4 py-3 text-xs text-stone-400">No students in this grade yet.</p>}
+                      {list.map(s => (
+                        <div key={s.id} className="flex items-center gap-2 px-4 py-2 border-b border-stone-50 last:border-b-0">
+                          <input type="text" value={s.name} onChange={e => editStudent(s.id, "name", e.target.value)}
+                            className="flex-1 text-sm border border-transparent hover:border-stone-200 focus:border-stone-300 rounded px-2 py-1 min-w-0" />
+                          <input type="number" min="0" value={s.cheese} onChange={e => editStudent(s.id, "cheese", e.target.value)}
+                            className="w-14 text-sm border border-stone-200 rounded px-2 py-1" title="Cheese slices" />
+                          <input type="number" min="0" value={s.salami} onChange={e => editStudent(s.id, "salami", e.target.value)}
+                            className="w-14 text-sm border border-stone-200 rounded px-2 py-1" title="Salami slices" />
+                          <button onClick={() => removeStudent(s.id)} className="text-stone-300 hover:text-red-500 px-1">✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {grouped.other.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                <p className="text-xs text-amber-800 font-medium mb-2">Unrecognized grade ({grouped.other.length})</p>
+                {grouped.other.map(s => (
+                  <div key={s.id} className="flex items-center gap-2 py-1 text-sm">
+                    <span className="flex-1">{s.name}</span>
+                    <span className="text-xs text-stone-500">{s.grade || "no grade"}</span>
+                    <button onClick={() => removeStudent(s.id)} className="text-stone-300 hover:text-red-500 px-1">✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "teachers" && (
+        <div className="p-4">
+          <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+            <h2 className="text-sm font-semibold text-stone-700 mb-3">Add a staff order</h2>
+            <div className="flex flex-col gap-2">
+              <input type="text" placeholder="Teacher / staff name" value={newTeacher.name}
+                onChange={e => setNewTeacher({ ...newTeacher, name: e.target.value })}
+                className="border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+              <div className="grid grid-cols-2 gap-2">
+                <input type="number" min="0" value={newTeacher.cheese} placeholder="Cheese"
+                  onChange={e => setNewTeacher({ ...newTeacher, cheese: e.target.value })}
+                  className="border border-stone-300 rounded-lg px-2 py-2 text-sm" />
+                <input type="number" min="0" value={newTeacher.salami} placeholder="Salami"
+                  onChange={e => setNewTeacher({ ...newTeacher, salami: e.target.value })}
+                  className="border border-stone-300 rounded-lg px-2 py-2 text-sm" />
+              </div>
+              <button onClick={addTeacher} className="bg-[#B23A2E] text-white rounded-lg py-2 text-sm font-medium mt-1">
+                + Add staff order
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-stone-100">
+              <span className="text-sm font-medium text-stone-800">Staff orders ({teacherTotal.count})</span>
+              <span className="text-xs text-stone-500">🧀 {teacherTotal.cheese} · 🍕 {teacherTotal.salami}</span>
+            </div>
+            {teachers.length === 0 && <p className="px-4 py-3 text-xs text-stone-400">No staff orders yet.</p>}
+            {teachers.map(t => (
+              <div key={t.id} className="flex items-center gap-2 px-4 py-2 border-b border-stone-50 last:border-b-0">
+                <input type="text" value={t.name} onChange={e => editTeacher(t.id, "name", e.target.value)}
+                  className="flex-1 text-sm border border-transparent hover:border-stone-200 focus:border-stone-300 rounded px-2 py-1 min-w-0" />
+                <input type="number" min="0" value={t.cheese} onChange={e => editTeacher(t.id, "cheese", e.target.value)}
+                  className="w-14 text-sm border border-stone-200 rounded px-2 py-1" title="Cheese slices" />
+                <input type="number" min="0" value={t.salami} onChange={e => editTeacher(t.id, "salami", e.target.value)}
+                  className="w-14 text-sm border border-stone-200 rounded px-2 py-1" title="Salami slices" />
+                <button onClick={() => removeTeacher(t.id)} className="text-stone-300 hover:text-red-500 px-1">✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <footer className="px-4 py-3 text-center text-xs text-stone-400 border-t border-stone-200 bg-white">
+        Changes save automatically to your Google Sheet.
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
