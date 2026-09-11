@@ -81,6 +81,7 @@ function App() {
 
   const [newStudent, setNewStudent] = useState({ name: "", grade: GRADES[0], cheese: 1, salami: 0 });
   const [newTeacher, setNewTeacher] = useState({ name: "", cheese: 1, salami: 0 });
+  const [importGrade, setImportGrade] = useState(GRADES[0]);
 
   const fileRef = useRef(null);
   const saveTimer = useRef(null);
@@ -168,17 +169,19 @@ function App() {
       const cheeseKey = findKey(rows[0], ["cheese", "cheese slices"]);
       const salamiKey = findKey(rows[0], ["salami", "salami slices"]);
 
-      if (!nameKey || !gradeKey) {
-        setImportError("Couldn't find name and grade columns. Use headers like Name, Grade, Cheese, Salami.");
+      if (!nameKey) {
+        setImportError("Couldn't find a name column. Use a header like Name or Student Name.");
         return;
       }
 
+      // No Grade column (e.g. a roster file for a single class) - use the
+      // grade picked in the dropdown for every row instead of erroring out.
       const imported = [];
       let skipped = 0;
       for (const row of rows) {
         const name = String(row[nameKey] || "").trim();
-        const grade = normalizeGrade(row[gradeKey]);
-        if (!name || !grade) { skipped++; continue; }
+        const grade = gradeKey ? (normalizeGrade(row[gradeKey]) || importGrade) : importGrade;
+        if (!name) { skipped++; continue; }
         imported.push({
           id: uid(),
           name,
@@ -188,7 +191,7 @@ function App() {
         });
       }
       if (!imported.length) {
-        setImportError("No valid rows found. Check that grades match Preschool through Grade 10.");
+        setImportError("No valid rows found - check the file has a name in every row.");
         return;
       }
       updateStudents(prev => [...prev, ...imported]);
@@ -276,9 +279,14 @@ function App() {
               <h2 className="text-sm font-semibold text-stone-700">Import from spreadsheet</h2>
               {saving && <span className="text-xs text-stone-400">Saving…</span>}
             </div>
+            <p className="text-xs text-stone-500 mb-2">If the file doesn't have a Grade column (e.g. a single class roster), pick the grade it belongs to:</p>
+            <select value={importGrade} onChange={e => setImportGrade(e.target.value)}
+              className="border border-stone-300 rounded-lg px-2 py-2 text-sm w-full mb-2">
+              {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" id="pizza-file-input" />
             <label htmlFor="pizza-file-input" className="flex items-center justify-center gap-2 border-2 border-dashed border-stone-300 rounded-lg py-3 text-sm text-stone-600 cursor-pointer hover:border-[#B23A2E] hover:text-[#B23A2E]">
-              Upload .xlsx or .csv (Name, Grade, Cheese, Salami)
+              Upload .xlsx or .csv (just a Name column is enough)
             </label>
             {importError && <p className="text-xs text-amber-700 mt-2">{importError}</p>}
           </div>
